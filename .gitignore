@@ -1,0 +1,5 @@
+# Ignora las dependencias
+node_modules
+
+# Ignora el archivo de secretos
+.env
