@@ -5,8 +5,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const jwt = require('jsonwebtoken'); // Para nuestros tokens de sesión
-const bcrypt = require('bcrypt'); // Para encriptar contraseñas
+const jwt = require('jsonwebtoken'); 
+const bcrypt = require('bcrypt'); 
+const axios = require('axios'); // Necesario para la API de fútbol
 
 // --- Configuración ---
 const app = express();
@@ -24,7 +25,7 @@ async function initializeDatabase() {
   const client = await pool.connect();
   try {
     const createTablesQuery = `
-      -- 1. Tabla de Usuarios (limpia)
+      -- 1. Tabla de Usuarios
       CREATE TABLE IF NOT EXISTS usuarios (
         id SERIAL PRIMARY KEY,
         nombre VARCHAR(100) NOT NULL,
@@ -51,7 +52,7 @@ async function initializeDatabase() {
         equipo_id INT REFERENCES equipos(id)
       );
 
-      -- 4. Tabla del Carrito de Compras (Lo que va a comprar AHORA)
+      -- 4. Tabla del Carrito de Compras
       CREATE TABLE IF NOT EXISTS carrito (
         id SERIAL PRIMARY KEY,
         usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -60,28 +61,27 @@ async function initializeDatabase() {
         UNIQUE(usuario_id, producto_id)
       );
       
-      -- 5. ¡NUEVO! Preferencias del Usuario (Para el Home)
+      -- 5. Preferencias del Usuario (equipo favorito de la API de fútbol)
       CREATE TABLE IF NOT EXISTS preferencias_usuario (
         id SERIAL PRIMARY KEY,
         usuario_id INT NOT NULL UNIQUE REFERENCES usuarios(id) ON DELETE CASCADE,
-        equipo_favorito_id INT, -- El ID que viene de la API-Football
+        equipo_favorito_id INT, -- ID de API-Football
         equipo_favorito_nombre VARCHAR(100),
         equipo_favorito_logo VARCHAR(255)
       );
 
-      -- 6. ¡NUEVO! Camisetas Guardadas (Wishlist)
+      -- 6. Camisetas Guardadas (Wishlist)
       CREATE TABLE IF NOT EXISTS camisetas_guardadas (
         id SERIAL PRIMARY KEY,
         usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
         producto_id INT NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
-        UNIQUE(usuario_id, producto_id) -- No puede guardar la misma camiseta dos veces
+        UNIQUE(usuario_id, producto_id)
       );
     `;
     
     await client.query(createTablesQuery);
     console.log('¡Todas las tablas (incluyendo preferencias y guardados) han sido creadas/verificadas!');
     
-    // Cargar datos de ejemplo (camisetas)
     await seedDatabase(client);
 
   } catch (err) {
@@ -91,16 +91,13 @@ async function initializeDatabase() {
   }
 }
 
-// --- Cargar datos de ejemplo (SOLO SI ESTÁ VACÍO) ---
+// --- Cargar datos de ejemplo (Tienda) ---
 async function seedDatabase(client) {
   try {
     const resEquipos = await client.query('SELECT COUNT(*) FROM equipos');
-    if (resEquipos.rows[0].count > 0) {
-      console.log('La base de datos (tienda) ya tiene datos de ejemplo.');
-      return;
-    }
+    if (resEquipos.rows[0].count > 0) return; // Si ya hay datos, salir
 
-    console.log('Base de datos vacía. Cargando datos de ejemplo (tienda)...');
+    console.log('Cargando datos de ejemplo (tienda)...');
     
     await client.query(`
       INSERT INTO equipos (nombre, logo_url) VALUES
@@ -113,8 +110,6 @@ async function seedDatabase(client) {
       ('Camiseta LDU Quito (Local) 2025', 'La nueva camiseta titular.', 59.99, 'https://i.imgur.com/ejkwi4m.png', 1),
       ('Camiseta Barcelona SC (Local) 2025', 'La gloriosa camiseta del Ídolo.', 59.99, 'https://i.imgur.com/O1n3f0W.png', 2);
     `);
-    
-    console.log('¡Datos de ejemplo de la tienda cargados con éxito!');
   } catch (error) {
     console.error('Error al cargar datos de ejemplo (seed):', error);
   }
@@ -137,45 +132,116 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// --- Rutas de Autenticación (Login / Registro) ---
-// (Son las mismas que ya tenías, no las pego para ahorrar espacio, pero van aquí)
-app.post('/auth/register', async (req, res) => { /* ... TU CÓDIGO DE REGISTRO ... */ });
-app.post('/auth/login', async (req, res) => { /* ... TU CÓDIGO DE LOGIN ... */ });
+// --- Rutas de Autenticación ---
+
+app.post('/auth/register', async (req, res) => {
+  try {
+    const { nombre, email, password } = req.body;
+    if (!nombre || !email || !password) {
+      return res.status(400).json({ message: "Nombre, email y contraseña son requeridos." });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const newUserResult = await pool.query(
+      'INSERT INTO usuarios (nombre, email, password) VALUES ($1, $2, $3) RETURNING id, nombre, email',
+      [nombre, email, passwordHash]
+    );
+    const usuario = newUserResult.rows[0];
+
+    const token = jwt.sign({ userId: usuario.id, email: usuario.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.status(201).json({ message: "Usuario registrado con éxito", token, usuario });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ message: "El correo electrónico ya está registrado." });
+    }
+    console.error('Error en /auth/register:', error);
+    res.status(500).json({ message: "Error interno del servidor" });
+  }
+});
+
+app.post('/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email y contraseña son requeridos." });
+    }
+
+    const userResult = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ message: "Credenciales incorrectas." });
+    }
+
+    const usuario = userResult.rows[0];
+    const isMatch = await bcrypt.compare(password, usuario.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Credenciales incorrectas." });
+    }
+
+    const token = jwt.sign({ userId: usuario.id, email: usuario.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.status(200).json({
+      message: "Inicio de sesión exitoso",
+      token,
+      usuario: { id: usuario.id, nombre: usuario.nombre, email: usuario.email }
+    });
+  } catch (error) {
+    console.error('Error en /auth/login:', error);
+    res.status(500).json({ message: "Error interno del servidor" });
+  }
+});
 
 
-// --- Rutas de la Tienda (Camisetas de tu BD) ---
-app.get('/api/equipos-tienda', authenticateToken, async (req, res) => { /* ... TU CÓDIGO ... */ });
-app.get('/api/productos', authenticateToken, async (req, res) => { /* ... TU CÓDIGO ... */ });
-app.get('/api/carrito', authenticateToken, async (req, res) => { /* ... TU CÓDIGO ... */ });
-app.post('/api/carrito/add', authenticateToken, async (req, res) => { /* ... TU CÓDIGO ... */ });
+// --- Rutas de Tienda y Carrito ---
+app.get('/api/productos', authenticateToken, async (req, res) => {
+  const result = await pool.query('SELECT p.*, e.nombre as equipo_nombre FROM productos p JOIN equipos e ON p.equipo_id = e.id');
+  res.json(result.rows);
+});
 
-// --- ¡NUEVAS RUTAS DE PREFERENCIAS! ---
+app.post('/api/carrito/add', authenticateToken, async (req, res) => {
+  const { producto_id, cantidad } = req.body;
+  const usuario_id = req.user.userId;
+  const result = await pool.query(
+    `INSERT INTO carrito (usuario_id, producto_id, cantidad)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (usuario_id, producto_id)
+     DO UPDATE SET cantidad = carrito.cantidad + $3
+     RETURNING *`,
+    [usuario_id, producto_id, cantidad || 1]
+  );
+  res.status(201).json(result.rows[0]);
+});
 
-// GET /api/preferencias - Revisa si el usuario tiene equipo favorito
+app.get('/api/carrito', authenticateToken, async (req, res) => {
+  const result = await pool.query(
+    `SELECT c.id as carrito_id, c.cantidad, p.* FROM carrito c
+     JOIN productos p ON c.producto_id = p.id
+     WHERE c.usuario_id = $1`,
+    [req.user.userId]
+  );
+  res.json(result.rows);
+});
+
+// --- Rutas de Preferencias (Guardar Equipo Favorito) ---
+
 app.get('/api/preferencias', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM preferencias_usuario WHERE usuario_id = $1',
       [req.user.userId]
     );
-    if (result.rows.length > 0) {
-      res.json(result.rows[0]); // Devuelve el equipo favorito
-    } else {
-      res.json(null); // No tiene equipo favorito
-    }
+    res.json(result.rows.length > 0 ? result.rows[0] : null); 
   } catch (error) {
     res.status(500).json({ message: 'Error al obtener preferencias', error: error.message });
   }
 });
 
-// POST /api/preferencias - Guarda el equipo favorito del usuario
 app.post('/api/preferencias', authenticateToken, async (req, res) => {
   const { equipo_id, nombre, logo } = req.body;
   if (!equipo_id || !nombre || !logo) {
     return res.status(400).json({ message: 'Se requiere ID, nombre y logo del equipo.' });
   }
   try {
-    // "ON CONFLICT" actualiza si ya existe, o inserta si es nuevo
     const result = await pool.query(
       `INSERT INTO preferencias_usuario (usuario_id, equipo_favorito_id, equipo_favorito_nombre, equipo_favorito_logo)
        VALUES ($1, $2, $3, $4)
@@ -192,37 +258,47 @@ app.post('/api/preferencias', authenticateToken, async (req, res) => {
   }
 });
 
-// --- ¡NUEVAS RUTAS DE CAMISETAS GUARDADAS (Wishlist)! ---
+// --- Rutas de Wishlist (Camisetas Guardadas) ---
 
-// GET /api/camisetas-guardadas
 app.get('/api/camisetas-guardadas', authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT p.* FROM camisetas_guardadas cs
-       JOIN productos p ON cs.producto_id = p.id
-       WHERE cs.usuario_id = $1`,
-      [req.user.userId]
-    );
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ message: 'Error al obtener camisetas guardadas', error: error.message });
-  }
+  const result = await pool.query(
+    `SELECT p.* FROM camisetas_guardadas cs
+     JOIN productos p ON cs.producto_id = p.id
+     WHERE cs.usuario_id = $1`,
+    [req.user.userId]
+  );
+  res.json(result.rows);
 });
 
-// POST /api/camisetas-guardadas
-app.post('/api/camisetas-guardadas', authenticateToken, async (req, res) => {
-  const { producto_id } = req.body;
-  if (!producto_id) {
-    return res.status(400).json({ message: 'Se requiere producto_id.' });
+
+// --- ¡NUEVA RUTA DE PROXY PARA LA API DE FÚTBOL! ---
+
+app.get('/api/equipos-liga-pro', authenticateToken, async (req, res) => {
+  // Las API Keys están en las variables de entorno de Render
+  const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY; 
+  const API_HOST = 'api-football-v1.p.rapidapi.com';
+  const LEAGUE_ID_ECUADOR = 207; 
+  const SEASON = 2024;
+  
+  if (!RAPIDAPI_KEY) {
+    return res.status(500).json({ message: "La API Key de fútbol no está configurada en el servidor." });
   }
+  
   try {
-    await pool.query(
-      'INSERT INTO camisetas_guardadas (usuario_id, producto_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [req.user.userId, producto_id]
-    );
-    res.status(201).json({ message: 'Camiseta guardada' });
+    // Usamos la API Key que me diste (a097e1bdd2...) de forma SEGURA desde Render
+    const response = await axios.get('https://api-football-v1.p.rapidapi.com/v3/teams', {
+      params: { league: LEAGUE_ID_ECUADOR, season: SEASON },
+      headers: {
+        'x-rapidapi-key': RAPIDAPI_KEY, 
+        'x-rapidapi-host': API_HOST,
+      },
+    });
+    
+    // Devolvemos la respuesta directamente a la App Móvil
+    res.json(response.data.response);
   } catch (error) {
-    res.status(500).json({ message: 'Error al guardar camiseta', error: error.message });
+    console.error('Error al obtener equipos de RapidAPI:', error.response?.data);
+    res.status(500).json({ message: 'Error en el servidor al cargar datos de fútbol.', detail: error.message });
   }
 });
 
@@ -240,7 +316,3 @@ async function startServer() {
 }
 
 startServer();
-
-// --- IMPORTANTE: Pega aquí tus rutas de Login, Registro y Tienda que ya tenías ---
-// (No las pego de nuevo para no hacer esto gigantesco,
-// pero son las mismas que ya tenías en tu archivo original)
