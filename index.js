@@ -26,58 +26,69 @@ async function initializeDatabase() {
   const client = await pool.connect();
   try {
     const createTablesQuery = `
-      -- 1. Tabla de Usuarios
-      CREATE TABLE IF NOT EXISTS usuarios (
-        id SERIAL PRIMARY KEY,
-        nombre VARCHAR(100) NOT NULL,
-        email VARCHAR(100) NOT NULL UNIQUE,
-        password VARCHAR(255) NOT NULL,
-        created_at TIMESTZ DEFAULT NOW()
-      );
+  -- 1. Tabla de Usuarios
+  CREATE TABLE IF NOT EXISTS usuarios (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
 
-      -- 2. Tabla de Equipos (Base local para simulación de favoritos)
-      CREATE TABLE IF NOT EXISTS equipos (
-        id SERIAL PRIMARY KEY,
-        nombre VARCHAR(100) NOT NULL UNIQUE,
-        logo_url VARCHAR(255)
-      );
+  -- 2. Tabla de Equipos
+  CREATE TABLE IF NOT EXISTS equipos (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL UNIQUE,
+    logo_url VARCHAR(255)
+  );
 
-      -- 3. Tabla de Productos (Tienda local - IDs de la API Externa)
-      CREATE TABLE IF NOT EXISTS productos (
-        id SERIAL PRIMARY KEY,
-        nombre VARCHAR(255) NOT NULL,
-        descripcion TEXT,
-        precio DECIMAL(10, 2) NOT NULL,
-        imagen_url VARCHAR(255)
-      );
-      
-      -- 4. Tabla del Carrito de Compras (usa ID externo de producto)
-      CREATE TABLE IF NOT EXISTS carrito (
-        id SERIAL PRIMARY KEY,
-        usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
-        producto_id VARCHAR(50) NOT NULL, 
-        cantidad INT NOT NULL DEFAULT 1,
-        nombre_producto VARCHAR(255), 
-        precio_producto DECIMAL(10, 2),
-        UNIQUE(usuario_id, producto_id)
-      );
-      
-      -- 5. Preferencias del Usuario (Equipo/Liga Favorita)
-      CREATE TABLE IF NOT EXISTS preferencias_usuario (
-        id SERIAL PRIMARY KEY,
-        usuario_id INT NOT NULL UNIQUE REFERENCES usuarios(id) ON DELETE CASCADE,
-        equipo_favorito_nombre VARCHAR(100), -- Nombre del equipo/país (ej: Real Madrid, Argentina)
-        equipo_favorito_logo VARCHAR(255)
-      );
+  -- 3. Tabla de Productos
+  CREATE TABLE IF NOT EXISTS productos (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(255) NOT NULL,
+    descripcion TEXT,
+    precio DECIMAL(10, 2) NOT NULL,
+    imagen_url VARCHAR(255)
+  );
+  
+  -- 4. Carrito
+  CREATE TABLE IF NOT EXISTS carrito (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    producto_id VARCHAR(50) NOT NULL,
+    cantidad INT NOT NULL DEFAULT 1,
+    nombre_producto VARCHAR(255),
+    precio_producto DECIMAL(10, 2),
+    UNIQUE(usuario_id, producto_id)
+  );
+  
+  -- 5. Preferencias (País favorito)
+  CREATE TABLE IF NOT EXISTS preferencias_usuario (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL UNIQUE REFERENCES usuarios(id) ON DELETE CASCADE,
+    equipo_favorito_nombre VARCHAR(100),
+    equipo_favorito_logo VARCHAR(255)
+  );
 
-      -- 6. Camisetas Guardadas (Wishlist, usa ID externo de producto)
-      CREATE TABLE IF NOT EXISTS camisetas_guardadas (
-        id SERIAL PRIMARY KEY,
-        usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
-        producto_id VARCHAR(50) NOT NULL, -- ID de la API Externa
-        UNIQUE(usuario_id, producto_id)
-      );
-    `;
+  -- 6. Camisetas Guardadas (Wishlist)
+  CREATE TABLE IF NOT EXISTS camisetas_guardadas (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    producto_id VARCHAR(50) NOT NULL,
+    UNIQUE(usuario_id, producto_id)
+  );
+
+  -- 7. Platos guardados por usuario
+  CREATE TABLE IF NOT EXISTS platos_guardados (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    pais VARCHAR(100) NOT NULL,
+    nombre_plato VARCHAR(255) NOT NULL,
+    imagen_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(usuario_id, pais, nombre_plato)
+  );
+`;
     
     await client.query(createTablesQuery);
     console.log('¡Estructura de BD verificada y lista para APIs externas!');
@@ -283,3 +294,70 @@ async function startServer() {
 }
 
 startServer();
+// ================== PLATOS GUARDADOS ==================
+
+// Guardar plato favorito
+app.post('/api/platos/guardar', authenticateToken, async (req, res) => {
+  const { pais, nombre_plato, imagen_url } = req.body;
+  const usuario_id = req.user.userId;
+
+  if (!pais || !nombre_plato) {
+    return res.status(400).json({ message: 'País y nombre del plato son requeridos.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO platos_guardados (usuario_id, pais, nombre_plato, imagen_url)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (usuario_id, pais, nombre_plato)
+       DO NOTHING
+       RETURNING *`,
+      [usuario_id, pais, nombre_plato, imagen_url || null]
+    );
+
+    if (result.rows.length === 0) {
+      // Ya existía
+      return res.status(200).json({ message: 'Este plato ya estaba guardado.' });
+    }
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error al guardar plato:', error.message);
+    res.status(500).json({ message: 'Error al guardar plato.' });
+  }
+});
+
+// Listar platos guardados del usuario
+app.get('/api/platos', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, pais, nombre_plato, imagen_url, created_at
+       FROM platos_guardados
+       WHERE usuario_id = $1
+       ORDER BY created_at DESC`,
+      [req.user.userId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error al obtener platos guardados:', error.message);
+    res.status(500).json({ message: 'Error al obtener platos guardados.' });
+  }
+});
+
+// Eliminar un plato guardado
+app.delete('/api/platos/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM platos_guardados WHERE id = $1 AND usuario_id = $2 RETURNING *',
+      [id, req.user.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Plato no encontrado.' });
+    }
+    res.json({ message: 'Plato eliminado.' });
+  } catch (error) {
+    console.error('Error al eliminar plato:', error.message);
+    res.status(500).json({ message: 'Error al eliminar plato.' });
+  }
+});
