@@ -1,4 +1,8 @@
-// --- Importar Librerías ---
+// ===============================
+//  BACKEND FUTBOLAPP COMPLETO
+//  Sin .env, listo para Render + local
+// ===============================
+
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -6,25 +10,48 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const axios = require('axios');
 
-// --- Configuración APP ---
+// ===============================
+//  CONFIGURACIÓN GENERAL
+// ===============================
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Clave JWT fija (educativo)
+// JWT fijo para fines educativos (puedes cambiarlo)
 const JWT_SECRET = 'clave_super_secreta_demo';
 
-// Configuración de PostgreSQL SIN .env (pon aquí tu cadena real)
+// URL LOCAL opcional (para desarrollo en tu PC).
+// Si no la usas, déjala vacía. Si la usas, pon tu cadena real.
+// EJEMPLO: 'postgres://postgres:1234@localhost:5432/futbolapp'
+const LOCAL_DB_URL = ''; // <-- Si trabajas local con Postgres, ponla aquí
+
+// En Render se usa DATABASE_URL (configurada en el panel).
+// Si no hay ninguna, tiramos error claro.
+const connectionString = process.env.DATABASE_URL || LOCAL_DB_URL;
+
+if (!connectionString) {
+  console.error('❌ No hay DATABASE_URL (Render) ni LOCAL_DB_URL configurada.');
+  process.exit(1);
+}
+
+// Detecta si estamos en Render para manejar SSL
+const IS_RENDER = !!process.env.RENDER;
+
 const pool = new Pool({
-  connectionString:
-    'postgres://USUARIO:PASSWORD@HOST:PUERTO/NOMBRE_BASE', // <-- EDITA ESTO
-  ssl: false, // pon true+rejectUnauthorized:false si usas cloud con SSL
+  connectionString,
+  ssl: IS_RENDER
+    ? { rejectUnauthorized: false } // Render / producción
+    : false,                        // Local sin SSL
 });
 
-// --- Middlewares ---
+// Middlewares globales
 app.use(cors());
 app.use(express.json());
 
-// --- Auth Middleware ---
+// ===============================
+//  MIDDLEWARE AUTENTICACIÓN
+// ===============================
+
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -37,9 +64,9 @@ function authenticateToken(req, res, next) {
   });
 }
 
-/* ===================================
-   INICIALIZAR BD (TABLAS NECESARIAS)
-   =================================== */
+// ===============================
+//  INICIALIZAR BASE DE DATOS
+// ===============================
 
 async function initializeDatabase() {
   console.log('Verificando estructura de BD...');
@@ -62,7 +89,7 @@ async function initializeDatabase() {
         logo_url VARCHAR(255)
       );
 
-      -- 3. Productos (opcional local)
+      -- 3. Productos (local opcional)
       CREATE TABLE IF NOT EXISTS productos (
         id SERIAL PRIMARY KEY,
         nombre VARCHAR(255) NOT NULL,
@@ -109,12 +136,14 @@ async function initializeDatabase() {
         UNIQUE(usuario_id, pais, nombre_plato)
       );
     `;
+
     await client.query(createTablesQuery);
-    console.log('Tablas listas ✅');
+    console.log('✅ Tablas listas');
 
     await seedDatabase(client);
   } catch (err) {
     console.error('Error al inicializar BD:', err);
+    throw err;
   } finally {
     client.release();
   }
@@ -137,15 +166,16 @@ async function seedDatabase(client) {
   }
 }
 
-/* ===========================
-   RUTAS: AUTENTICACIÓN
-   =========================== */
+// ===============================
+//  RUTAS: AUTENTICACIÓN
+// ===============================
 
 app.post('/auth/register', async (req, res) => {
   try {
     const { nombre, email, password } = req.body;
-    if (!nombre || !email || !password)
+    if (!nombre || !email || !password) {
       return res.status(400).json({ message: 'Todos los campos son requeridos.' });
+    }
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
@@ -168,25 +198,27 @@ app.post('/auth/register', async (req, res) => {
       return res.status(409).json({ message: 'El correo ya está registrado.' });
     }
     console.error(err);
-    res.status(500).json({ message: 'Error interno' });
+    res.status(500).json({ message: 'Error interno del servidor.' });
   }
 });
 
 app.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+
     const result = await pool.query(
       'SELECT * FROM usuarios WHERE email = $1',
       [email]
     );
-
-    if (result.rows.length === 0)
+    if (result.rows.length === 0) {
       return res.status(401).json({ message: 'Credenciales incorrectas.' });
+    }
 
     const usuario = result.rows[0];
     const ok = await bcrypt.compare(password, usuario.password);
-    if (!ok)
+    if (!ok) {
       return res.status(401).json({ message: 'Credenciales incorrectas.' });
+    }
 
     const token = jwt.sign(
       { userId: usuario.id, email: usuario.email },
@@ -195,55 +227,50 @@ app.post('/auth/login', async (req, res) => {
     );
 
     res.json({
-      message: 'Login exitoso',
+      message: 'Inicio de sesión exitoso',
       token,
       usuario: { id: usuario.id, nombre: usuario.nombre, email: usuario.email },
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Error interno' });
+    res.status(500).json({ message: 'Error interno del servidor.' });
   }
 });
 
-/* ===========================
-   RUTAS: PRODUCTOS / TIENDA
-   =========================== */
+// ===============================
+//  RUTAS: PRODUCTOS / TIENDA
+// ===============================
 
 const FAKE_STORE_API_URL = 'https://fakestoreapi.com/products';
 
-// Productos de respaldo si falla la API externa
 const FALLBACK_PRODUCTS = [
   {
     id: '1',
     nombre: 'Jersey Clásico Albiceleste',
     descripcion: 'Camiseta inspirada en la pasión sudamericana.',
     precio: 39.99,
-    imagen_url:
-      'https://images.pexels.com/photos/4108800/pexels-photo-4108800.jpeg',
+    imagen_url: 'https://images.pexels.com/photos/4108800/pexels-photo-4108800.jpeg',
   },
   {
     id: '2',
     nombre: 'Jersey Andino Edición Limitada',
     descripcion: 'Detalles dorados y colores de la cordillera.',
     precio: 44.99,
-    imagen_url:
-      'https://images.pexels.com/photos/999309/pexels-photo-999309.jpeg',
+    imagen_url: 'https://images.pexels.com/photos/999309/pexels-photo-999309.jpeg',
   },
   {
     id: '3',
     nombre: 'Jersey Negro Alterno',
     descripcion: 'Minimalista, elegante, ideal para cualquier hincha.',
     precio: 34.99,
-    imagen_url:
-      'https://images.pexels.com/photos/7675003/pexels-photo-7675003.jpeg',
+    imagen_url: 'https://images.pexels.com/photos/7675003/pexels-photo-7675003.jpeg',
   },
   {
     id: '4',
     nombre: 'Jersey Retro 94',
     descripcion: 'Homenaje a las leyendas del fútbol clásico.',
     precio: 49.99,
-    imagen_url:
-      'https://images.pexels.com/photos/1884574/pexels-photo-1884574.jpeg',
+    imagen_url: 'https://images.pexels.com/photos/1884574/pexels-photo-1884574.jpeg',
   },
 ];
 
@@ -268,14 +295,13 @@ app.get('/api/productos', authenticateToken, async (req, res) => {
     res.json(camisetas);
   } catch (err) {
     console.error('Error productos API externa:', err.message);
-    // Nunca dejamos al front vacío:
-    res.json(FALLBACK_PRODUCTS);
+    res.json(FALLBACK_PRODUCTS); // Nunca 500 vacío: siempre damos algo
   }
 });
 
-/* ===========================
-   CARRITO
-   =========================== */
+// ===============================
+//  RUTAS: CARRITO
+// ===============================
 
 app.post('/api/carrito/add', authenticateToken, async (req, res) => {
   const { producto_id, cantidad, nombre_producto, precio_producto } = req.body;
@@ -320,9 +346,9 @@ app.get('/api/carrito', authenticateToken, async (req, res) => {
   }
 });
 
-/* ===========================
-   CAMISETAS GUARDADAS
-   =========================== */
+// ===============================
+//  RUTAS: CAMISETAS GUARDADAS
+// ===============================
 
 app.get('/api/camisetas-guardadas', authenticateToken, async (req, res) => {
   try {
@@ -358,9 +384,7 @@ app.post('/api/camisetas-guardadas', authenticateToken, async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res
-        .status(200)
-        .json({ message: 'Esta camiseta ya estaba guardada.' });
+      return res.status(200).json({ message: 'Esta camiseta ya estaba guardada.' });
     }
 
     res.status(201).json(result.rows[0]);
@@ -370,36 +394,30 @@ app.post('/api/camisetas-guardadas', authenticateToken, async (req, res) => {
   }
 });
 
-app.delete(
-  '/api/camisetas-guardadas/:id',
-  authenticateToken,
-  async (req, res) => {
-    const { id } = req.params;
-    try {
-      const result = await pool.query(
-        `DELETE FROM camisetas_guardadas
-         WHERE id = $1 AND usuario_id = $2
-         RETURNING *`,
-        [id, req.user.userId]
-      );
+app.delete('/api/camisetas-guardadas/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      `DELETE FROM camisetas_guardadas
+       WHERE id = $1 AND usuario_id = $2
+       RETURNING *`,
+      [id, req.user.userId]
+    );
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({ message: 'Camiseta no encontrada.' });
-      }
-
-      res.json({ message: 'Camiseta eliminada.' });
-    } catch (err) {
-      console.error('Error eliminar camiseta:', err.message);
-      res
-        .status(500)
-        .json({ message: 'Error al eliminar camiseta guardada.' });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Camiseta no encontrada.' });
     }
-  }
-);
 
-/* ===========================
-   PREFERENCIAS (PAÍS FAVORITO)
-   =========================== */
+    res.json({ message: 'Camiseta eliminada.' });
+  } catch (err) {
+    console.error('Error eliminar camiseta:', err.message);
+    res.status(500).json({ message: 'Error al eliminar camiseta guardada.' });
+  }
+});
+
+// ===============================
+//  RUTAS: PREFERENCIAS (PAÍS)
+// ===============================
 
 app.get('/api/preferencias', authenticateToken, async (req, res) => {
   try {
@@ -441,9 +459,9 @@ app.post('/api/preferencias', authenticateToken, async (req, res) => {
   }
 });
 
-/* ===========================
-   PAÍSES SUDAMÉRICA PARA PERFIL
-   =========================== */
+// ===============================
+//  RUTAS: PAÍSES SUDAMÉRICA
+// ===============================
 
 const SA_COUNTRIES = [
   'Argentina',
@@ -485,9 +503,9 @@ app.get('/api/equipos-del-mundo', authenticateToken, async (req, res) => {
   }
 });
 
-/* ===========================
-   PLATOS GUARDADOS
-   =========================== */
+// ===============================
+//  RUTAS: PLATOS GUARDADOS
+// ===============================
 
 app.post('/api/platos/guardar', authenticateToken, async (req, res) => {
   const { pais, nombre_plato, imagen_url } = req.body;
@@ -555,16 +573,16 @@ app.delete('/api/platos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-/* ===========================
-   INICIAR SERVIDOR
-   =========================== */
+// ===============================
+//  INICIAR SERVIDOR
+// ===============================
 
 async function startServer() {
   try {
     await initializeDatabase();
-    app.listen(PORT, () =>
-      console.log(`Servidor corriendo en puerto ${PORT}`)
-    );
+    app.listen(PORT, () => {
+      console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    });
   } catch (err) {
     console.error('No se pudo iniciar servidor:', err);
     process.exit(1);
