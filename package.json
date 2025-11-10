@@ -1,21 +1,25 @@
 {
   "name": "futbolapp-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend para FutbolApp con Express y PostgreSQL",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
+  "keywords": [
+    "express",
+    "postgresql",
+    "react-native"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bcrypt": "^6.0.0",
+    "axios": "^1.6.8", 
+    "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "google-auth-library": "^10.5.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.16.3"
+    "pg": "^8.11.5"
   }
 }
